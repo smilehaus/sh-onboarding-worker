@@ -1,0 +1,16 @@
+{
+  "name": "sh-onboarding-worker",
+  "version": "1.0.0",
+  "description": "Smile Haus onboarding automation. OAuth + ClickUp task creation. Replaces Make.com.",
+  "private": true,
+  "scripts": {
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy",
+    "tail": "wrangler tail"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "^4.20241018.0",
+    "typescript": "^5.6.3",
+    "wrangler": "^3.80.0"
+  }
+}

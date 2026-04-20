@@ -1,0 +1,22 @@
+name = "sh-onboarding"
+main = "src/index.ts"
+compatibility_date = "2026-04-20"
+
+# Workers free tier, us-central region proximity for Austin offices
+workers_dev = true
+
+# KV namespace for OAuth token + monitoring state.
+# Create once via: wrangler kv namespace create sh_onboarding_kv
+# Then paste the id below.
+[[kv_namespaces]]
+binding = "SH_KV"
+id = "REPLACE_WITH_KV_ID"
+
+# Public env vars (client_id is not secret)
+[vars]
+CLICKUP_CLIENT_ID = "AU2G62HBCWTOI9XD62HT98NT9RH1FFYV"
+ALLOWED_ORIGIN = "https://smilehaus.github.io"
+
+# Secrets (set via `wrangler secret put <NAME>`):
+#   CLICKUP_CLIENT_SECRET   - from the ClickUp OAuth app settings
+#   ERROR_NOTIFY_TASK_ID    - optional: ClickUp task where errors get posted as comments
