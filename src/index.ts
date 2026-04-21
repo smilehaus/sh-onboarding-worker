@@ -126,22 +126,23 @@ interface OnboardInput {
   tasks: Array<{ n: string; l: string; p: number | string; d: number; quiz?: string; due?: string | null }>;
 }
 
-async function createOnboarding(env: Env, input: OnboardInput): Promise<any> {
-  // Architecture (matches existing "By Trainee" view in Active Trainees list):
-  //   Parent task: "Name - Office - Role - StartDate"
-  //     Week 1 subtask
-  //       Day tasks (sub-subtasks)
-  //     Week 2 subtask
-  //       Day tasks
-  //     ... etc
-  // Everything lives in the ONE Active Trainees list.
+// Chunked onboarding — split across multiple Worker invocations to stay under
+// Cloudflare free-tier's 50-subrequest-per-invocation cap.
+// Architecture (matches existing "By Trainee" view in Active Trainees list):
+//   Parent task: "Name - Office - Role - StartDate"
+//     Week 1 subtask
+//       Day tasks (sub-subtasks)
+//     Week 2 subtask
+//     ... etc
+// Everything lives in the ONE Active Trainees list.
 
+async function createParent(env: Env, input: OnboardInput): Promise<any> {
   const startMs = new Date(input.start).getTime();
   const homeOfficeCustom = input.homeOfficeId
     ? [{ id: HOME_OFFICE_FIELD_ID, value: input.homeOfficeId }]
     : undefined;
 
-  // 1. Parent task for the trainee
+  // 1. Parent task
   const parent = await cu(env, "POST", `/list/${LIST_ID_ACTIVE}/task`, {
     name: `${input.name} - ${input.office} - ${input.role} - ${input.start}`,
     description: `Trainee: ${input.traineeEmail || "n/a"}\nTrainer: ${input.trainerEmail || "n/a"}\nStart: ${input.start}`,
@@ -149,7 +150,7 @@ async function createOnboarding(env: Env, input: OnboardInput): Promise<any> {
     custom_fields: homeOfficeCustom,
   });
 
-  // 2. Four week subtasks, nested under parent
+  // 2. Four week subtasks (5 subrequests total, well under cap)
   const weekLabels = {
     w1: "Week 1 — Foundation & Front Desk Basics",
     w2: "Week 2 — Reinforcement & Supervised Practice",
@@ -165,11 +166,37 @@ async function createOnboarding(env: Env, input: OnboardInput): Promise<any> {
     weeks[key] = wk.id;
   }
 
-  // 3. Day tasks (49), each a sub-subtask of their week
+  return {
+    parentTask: {
+      id: parent.id,
+      name: parent.name,
+      url: `https://app.clickup.com/t/${parent.id}`,
+    },
+    weekIds: weeks,
+  };
+}
+
+interface BatchInput {
+  weekIds: Record<string, string>;
+  employeeName: string;
+  office: string;
+  tasks: Array<{ n: string; l: string; p: number | string; d: number; quiz?: string; due?: string | null }>;
+}
+
+async function createTaskBatch(env: Env, input: BatchInput): Promise<any> {
+  // Each day task = 1 subrequest (create) + 1 subrequest if quiz (PUT description).
+  // Cap the batch at 22 to guarantee we stay under 50 even if all are quiz tasks.
+  if (input.tasks.length > 22) {
+    throw new Error(`Batch too large: ${input.tasks.length}. Max 22 per call.`);
+  }
+
   const created: Array<{ id: string; name: string; quiz?: string }> = [];
   for (const t of input.tasks) {
-    const weekParent = weeks[t.l];
-    if (!weekParent) continue;
+    const weekParent = input.weekIds[t.l];
+    if (!weekParent) {
+      created.push({ id: "", name: t.n, quiz: t.quiz });
+      continue;
+    }
 
     const dueMs = t.due ? new Date(t.due).getTime() : undefined;
     const task = await cu(env, "POST", `/list/${LIST_ID_ACTIVE}/task`, {
@@ -180,25 +207,16 @@ async function createOnboarding(env: Env, input: OnboardInput): Promise<any> {
     });
     created.push({ id: task.id, name: task.name, quiz: t.quiz });
 
-    // Quiz task: embed ?taskId= in the description so trainees get correct attribution
-    if (t.quiz) {
-      const quizUrl = `https://smilehaus.github.io/smilehaus-onboarding/quiz.html?week=${t.quiz}&taskId=${task.id}&name=${encodeURIComponent(input.name)}&office=${input.office}`;
+    // Embed quiz URL with the actual taskId for correct attribution
+    if (t.quiz && task.id) {
+      const quizUrl = `https://smilehaus.github.io/smilehaus-onboarding/quiz.html?week=${t.quiz}&taskId=${task.id}&name=${encodeURIComponent(input.employeeName)}&office=${input.office}`;
       await cu(env, "PUT", `/task/${task.id}`, {
         description: `Click to take the quiz:\n${quizUrl}\n\nResults will post automatically to this task as a comment.`,
       });
     }
   }
 
-  return {
-    parentTask: {
-      id: parent.id,
-      name: parent.name,
-      url: `https://app.clickup.com/t/${parent.id}`,
-    },
-    weekTasks: weeks,
-    taskCount: created.length,
-    quizTasks: created.filter(t => t.quiz).map(t => ({ id: t.id, week: t.quiz })),
-  };
+  return { created, count: created.length };
 }
 
 // ---------- Quiz result: post as comment on the exact taskId ----------
@@ -312,9 +330,17 @@ export default {
         return json({ trainees: await listTrainees(env) }, env);
       }
 
-      if (path === "/api/onboard" && request.method === "POST") {
+      // Chunked onboarding — browser orchestrates multiple calls to stay under
+      // free-tier 50-subrequest-per-invocation cap.
+      if (path === "/api/onboard/parent" && request.method === "POST") {
         const payload = await request.json() as OnboardInput;
-        const result = await createOnboarding(env, payload);
+        const result = await createParent(env, payload);
+        return json({ ok: true, ...result }, env);
+      }
+
+      if (path === "/api/onboard/batch" && request.method === "POST") {
+        const payload = await request.json() as BatchInput;
+        const result = await createTaskBatch(env, payload);
         return json({ ok: true, ...result }, env);
       }
 
