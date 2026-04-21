@@ -63,44 +63,13 @@ function json(body: unknown, env: Env, status = 200): Response {
 }
 
 // ---------- OAuth token management ----------
+// ClickUp issues long-lived access tokens (no refresh token, no expiry).
+// If a token ever gets revoked, the next API call will 401 and the user
+// re-authorizes at /oauth/start.
 async function getAccessToken(env: Env): Promise<string> {
-  // Check cache
-  const cached = await env.SH_KV.get(KV_ACCESS);
-  const expStr = await env.SH_KV.get(KV_ACCESS_EXPIRES);
-  const now = Date.now();
-  if (cached && expStr && now < Number(expStr) - 60_000) {
-    return cached;
-  }
-  // Refresh
-  const refresh = await env.SH_KV.get(KV_REFRESH);
-  if (!refresh) throw new Error("No refresh token — OAuth not completed. Visit /oauth/start.");
-
-  const res = await fetch(`${CU_BASE}/oauth/token`, {
-    method: "POST",
-    headers: { "Content-Type": "application/x-www-form-urlencoded" },
-    body: new URLSearchParams({
-      client_id: env.CLICKUP_CLIENT_ID,
-      client_secret: env.CLICKUP_CLIENT_SECRET,
-      grant_type: "refresh_token",
-      refresh_token: refresh,
-    }),
-  });
-  if (!res.ok) {
-    const body = await res.text();
-    await logError(env, `OAuth refresh failed: ${res.status} ${body.slice(0, 500)}`);
-    throw new Error(`Refresh failed: ${res.status}`);
-  }
-  const data: any = await res.json();
-  if (!data.access_token) throw new Error("Refresh response missing access_token");
-
-  // ClickUp access tokens typically don't expire, but cache with a 24h ceiling
-  const expiresAt = now + (data.expires_in ? data.expires_in * 1000 : 24 * 3600 * 1000);
-  await env.SH_KV.put(KV_ACCESS, data.access_token);
-  await env.SH_KV.put(KV_ACCESS_EXPIRES, String(expiresAt));
-  if (data.refresh_token && data.refresh_token !== refresh) {
-    await env.SH_KV.put(KV_REFRESH, data.refresh_token);
-  }
-  return data.access_token;
+  const token = await env.SH_KV.get(KV_ACCESS);
+  if (!token) throw new Error("No access token — OAuth not completed. Visit /oauth/start.");
+  return token;
 }
 
 // ---------- ClickUp API wrapper with retry + auto-refresh ----------
@@ -115,11 +84,10 @@ async function cu(env: Env, method: string, path: string, body?: unknown, retrie
       },
       body: body ? JSON.stringify(body) : undefined,
     });
-    if (res.status === 401 && attempt === 0) {
-      // Access token bad — force-refresh and retry
+    if (res.status === 401) {
+      // Access token revoked. Clear it; user must re-authorize at /oauth/start.
       await env.SH_KV.delete(KV_ACCESS);
-      token = await getAccessToken(env);
-      continue;
+      throw new Error("ClickUp auth expired/revoked. Re-authorize at /oauth/start.");
     }
     if (res.status >= 500 && attempt < retries - 1) {
       await new Promise(r => setTimeout(r, 500 * Math.pow(2, attempt)));
@@ -317,11 +285,11 @@ export default {
       }
 
       if (path === "/api/status") {
-        const hasRefresh = !!(await env.SH_KV.get(KV_REFRESH));
+        const hasToken = !!(await env.SH_KV.get(KV_ACCESS));
         const lastError = await env.SH_KV.get(KV_LAST_ERROR);
         return json({
-          authenticated: hasRefresh,
-          needs_reauth: !hasRefresh,
+          authenticated: hasToken,
+          needs_reauth: !hasToken,
           reauth_url: `${url.origin}/oauth/start`,
           last_error: lastError ? JSON.parse(lastError) : null,
         }, env);
