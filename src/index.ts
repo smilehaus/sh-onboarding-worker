@@ -264,16 +264,18 @@ export default {
 
     try {
       // --- OAuth flow ---
+      // NOTE: ClickUp's OAuth app UI stores only the ORIGIN (strips any path).
+      // So we register "https://sh-onboarding.smilehaus.workers.dev" as the redirect URL
+      // and handle the ?code= callback at the root path below.
       if (path === "/oauth/start") {
-        const redirectUri = `${url.origin}/oauth/callback`;
+        const redirectUri = url.origin;
         const authUrl = `${CU_OAUTH}?client_id=${env.CLICKUP_CLIENT_ID}&redirect_uri=${encodeURIComponent(redirectUri)}`;
         return Response.redirect(authUrl, 302);
       }
 
-      if (path === "/oauth/callback") {
-        const code = url.searchParams.get("code");
-        if (!code) return new Response("Missing ?code in callback", { status: 400 });
-
+      // OAuth callback handler — ClickUp redirects to the origin with ?code=...
+      if (path === "/" && url.searchParams.get("code")) {
+        const code = url.searchParams.get("code")!;
         const res = await fetch(`${CU_BASE}/oauth/token`, {
           method: "POST",
           headers: { "Content-Type": "application/x-www-form-urlencoded" },
@@ -297,6 +299,16 @@ export default {
 
         // Redirect back to the form with a "connected" flag
         return Response.redirect(`${env.ALLOWED_ORIGIN}/smilehaus-onboarding/?connected=1`, 302);
+      }
+
+      // Friendly landing page at root when no ?code
+      if (path === "/" && request.method === "GET") {
+        return new Response(
+          `Smile Haus Onboarding Worker is alive.\n\n` +
+          `To authorize: visit /oauth/start\n` +
+          `To check status: visit /api/status\n`,
+          { status: 200, headers: { "Content-Type": "text/plain" } }
+        );
       }
 
       // --- Public endpoints ---

@@ -10,7 +10,7 @@ workers_dev = true
 # Then paste the id below.
 [[kv_namespaces]]
 binding = "SH_KV"
-id = "REPLACE_WITH_KV_ID"
+id = "b06825310ef94400b3786beb29b38e1e"
 
 # Public env vars (client_id is not secret)
 [vars]
