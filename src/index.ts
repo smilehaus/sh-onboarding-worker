@@ -127,51 +127,60 @@ interface OnboardInput {
 }
 
 async function createOnboarding(env: Env, input: OnboardInput): Promise<any> {
-  const folderName = `${input.name} - ${input.office} - ${input.role}`;
+  // Architecture (matches existing "By Trainee" view in Active Trainees list):
+  //   Parent task: "Name - Office - Role - StartDate"
+  //     Week 1 subtask
+  //       Day tasks (sub-subtasks)
+  //     Week 2 subtask
+  //       Day tasks
+  //     ... etc
+  // Everything lives in the ONE Active Trainees list.
 
-  // 1. Create folder in the Training space
-  const folder = await cu(env, "POST", `/space/${SPACE_ID_TRAINING}/folder`, {
-    name: folderName,
-  });
-
-  // 2. Create 4 week lists
-  const weekLabels = ["Week 1 — Foundation", "Week 2 — Reinforcement", "Week 3 — Treatment & Checkout", "Week 4 — Go-Live"];
-  const lists: Record<string, string> = {};
-  for (let i = 0; i < 4; i++) {
-    const list = await cu(env, "POST", `/folder/${folder.id}/list`, { name: weekLabels[i] });
-    lists[`w${i + 1}`] = list.id;
-  }
-
-  // 3. Create parent task in Active Trainees list
   const startMs = new Date(input.start).getTime();
   const homeOfficeCustom = input.homeOfficeId
     ? [{ id: HOME_OFFICE_FIELD_ID, value: input.homeOfficeId }]
     : undefined;
 
+  // 1. Parent task for the trainee
   const parent = await cu(env, "POST", `/list/${LIST_ID_ACTIVE}/task`, {
     name: `${input.name} - ${input.office} - ${input.role} - ${input.start}`,
-    description: `Training folder: ${folderName}\nTrainee: ${input.traineeEmail || "n/a"}\nTrainer: ${input.trainerEmail || "n/a"}`,
+    description: `Trainee: ${input.traineeEmail || "n/a"}\nTrainer: ${input.trainerEmail || "n/a"}\nStart: ${input.start}`,
     start_date: startMs,
     custom_fields: homeOfficeCustom,
   });
 
-  // 4. Create all 49 subtasks. For quiz tasks, update description afterward
-  // with the quiz URL including the actual taskId for correct attribution.
+  // 2. Four week subtasks, nested under parent
+  const weekLabels = {
+    w1: "Week 1 — Foundation & Front Desk Basics",
+    w2: "Week 2 — Reinforcement & Supervised Practice",
+    w3: "Week 3 — Treatment Planning & Checkout",
+    w4: "Week 4 — Applied Practice & Go-Live",
+  };
+  const weeks: Record<string, string> = {};
+  for (const key of Object.keys(weekLabels) as (keyof typeof weekLabels)[]) {
+    const wk = await cu(env, "POST", `/list/${LIST_ID_ACTIVE}/task`, {
+      name: weekLabels[key],
+      parent: parent.id,
+    });
+    weeks[key] = wk.id;
+  }
+
+  // 3. Day tasks (49), each a sub-subtask of their week
   const created: Array<{ id: string; name: string; quiz?: string }> = [];
   for (const t of input.tasks) {
-    const listId = lists[t.l];
-    if (!listId) continue;
+    const weekParent = weeks[t.l];
+    if (!weekParent) continue;
 
     const dueMs = t.due ? new Date(t.due).getTime() : undefined;
-    const task = await cu(env, "POST", `/list/${listId}/task`, {
+    const task = await cu(env, "POST", `/list/${LIST_ID_ACTIVE}/task`, {
       name: t.n,
-      parent: parent.id,
+      parent: weekParent,
       priority: typeof t.p === "number" ? t.p : null,
       due_date: dueMs,
     });
     created.push({ id: task.id, name: task.name, quiz: t.quiz });
 
-    // Quiz task: set description with the quiz URL embedding its own taskId
+    // Quiz task: embed ?taskId= in the description so trainees get correct attribution
     if (t.quiz) {
       const quizUrl = `https://smilehaus.github.io/smilehaus-onboarding/quiz.html?week=${t.quiz}&taskId=${task.id}&name=${encodeURIComponent(input.name)}&office=${input.office}`;
       await cu(env, "PUT", `/task/${task.id}`, {
@@ -181,9 +190,12 @@ async function createOnboarding(env: Env, input: OnboardInput): Promise<any> {
   }
 
   return {
-    folder: { id: folder.id, name: folder.name, url: `https://app.clickup.com/9014079163/v/f/${folder.id}` },
-    parentTask: { id: parent.id, url: `https://app.clickup.com/t/${parent.id}` },
-    lists,
+    parentTask: {
+      id: parent.id,
+      name: parent.name,
+      url: `https://app.clickup.com/t/${parent.id}`,
+    },
+    weekTasks: weeks,
     taskCount: created.length,
     quizTasks: created.filter(t => t.quiz).map(t => ({ id: t.id, week: t.quiz })),
   };
