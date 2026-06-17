@@ -142,10 +142,28 @@ async function createParent(env: Env, input: OnboardInput): Promise<any> {
     ? [{ id: HOME_OFFICE_FIELD_ID, value: input.homeOfficeId }]
     : undefined;
 
-  // 1. Parent task
+  // 1. Parent task — description includes Training Manual + Onboarding Instructions
+  //    doc links so OMs and trainees can find every SOP, quiz, and walk-through
+  //    from a single starting point.
+  const TRAINING_MANUAL_URL = "https://app.clickup.com/9014079163/docs/8cmfvnv-47334";
+  const ONBOARDING_INSTRUCTIONS_URL = "https://app.clickup.com/9014079163/docs/8cmfvnv-47374";
+  const parentDesc = [
+    `**📚 Training Manual:** ${TRAINING_MANUAL_URL}`,
+    `**📝 Onboarding Instructions (for OMs):** ${ONBOARDING_INSTRUCTIONS_URL}`,
+    ``,
+    `**Trainee:** ${input.traineeEmail || "n/a"}`,
+    `**Trainer:** ${input.trainerEmail || "n/a"}`,
+    `**Start Date:** ${input.start}`,
+    ``,
+    `---`,
+    `This folder contains the full 4-week Patient Coordinator onboarding program.`,
+    `Each week's tasks are nested as subtasks. Open the Training Manual above for`,
+    `SOP links, quiz questions, and high-conversion verbiage scripts.`,
+  ].join("\n");
+
   const parent = await cu(env, "POST", `/list/${LIST_ID_ACTIVE}/task`, {
     name: `${input.name} - ${input.office} - ${input.role} - ${input.start}`,
-    description: `Trainee: ${input.traineeEmail || "n/a"}\nTrainer: ${input.trainerEmail || "n/a"}\nStart: ${input.start}`,
+    description: parentDesc,
     start_date: startMs,
     custom_fields: homeOfficeCustom,
   });
