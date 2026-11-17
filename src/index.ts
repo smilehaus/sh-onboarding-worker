@@ -6,7 +6,7 @@
  *   - Stores refresh token in KV (permanent, encrypted at rest)
  *   - Auto-refreshes access tokens before expiry (self-healing)
  *   - Exposes API endpoints for the onboarding form:
- *       POST /api/onboard       creates folder + weeks + parent + 49 subtasks
+ *       POST /api/onboard       creates parent + phase subtasks (names/tier/manual supplied by the form) + day tasks
  *       POST /api/quiz-result   posts graded quiz comment on a specific task
  *       GET  /api/trainees      lists active trainees for the quiz picker
  *       GET  /api/health        public health check
@@ -37,6 +37,25 @@ const CU_OAUTH = "https://app.clickup.com/api";
 const SPACE_ID_TRAINING = "90144939387";     // New Member Training Program
 const LIST_ID_ACTIVE = "901415197832";        // Active Trainees - All Offices
 const HOME_OFFICE_FIELD_ID = "5f17c1c3-3c2a-46ae-96b5-fa1d195cfde9";
+// "Starting Tier" dropdown on the Active Trainees list (T1-T7), option ids by name
+const TIER_FIELD_ID = "075a9bd1-3874-4e65-821c-9f9c9c833b5b";
+const TIER_OPTION_IDS: Record<string, string> = {
+  T1: "ce6e9339-2630-4791-a968-289a361f5125",
+  T2: "21c4dcd8-961c-44a4-a609-333dc9c378e4",
+  T3: "c6ce9990-0afd-4e49-9045-561736196106",
+  T4: "60a5f976-8692-4888-beaf-448900a593fe",
+  T5: "82960282-405b-44e0-ba28-f7d106576ddc",
+  T6: "94d02a87-a5c7-4988-b015-7d416fedfb33",
+  T7: "09dd0ba8-963c-4a8c-a12b-f0f694314eec",
+};
+// Default (Patient Coordinator) manual + week names, used when the form does not send its own
+const DEFAULT_MANUAL_URL = "https://app.clickup.com/9014079163/docs/8cmfvnv-47334";
+const DEFAULT_WEEK_NAMES = [
+  "Week 1 — Foundation & Front Desk Basics",
+  "Week 2 — Reinforcement & Supervised Practice",
+  "Week 3 — Treatment Planning & Checkout",
+  "Week 4 — Applied Practice & Go-Live",
+];
 
 // ---------- KV keys ----------
 const KV_REFRESH = "oauth:refresh_token";
@@ -123,6 +142,11 @@ interface OnboardInput {
   traineeEmail?: string;
   trainerEmail?: string;
   homeOfficeId: string;
+  tier?: string | null;        // T1..T7 (roles with a tier path)
+  track?: string | null;       // informational (DA: A/B/C)
+  weeks?: number;              // number of phase subtasks (defaults to weekNames length)
+  weekNames?: string[] | null; // phase subtask names, in order (keys w1..wN)
+  manualUrl?: string | null;   // training manual for this role (defaults to the PC manual)
   tasks: Array<{ n: string; l: string; p: number | string; d: number; quiz?: string; due?: string | null }>;
 }
 
@@ -138,14 +162,20 @@ interface OnboardInput {
 
 async function createParent(env: Env, input: OnboardInput): Promise<any> {
   const startMs = new Date(input.start).getTime();
-  const homeOfficeCustom = input.homeOfficeId
-    ? [{ id: HOME_OFFICE_FIELD_ID, value: input.homeOfficeId }]
-    : undefined;
+  const customFields: Array<{ id: string; value: string }> = [];
+  if (input.homeOfficeId) customFields.push({ id: HOME_OFFICE_FIELD_ID, value: input.homeOfficeId });
+  if (input.tier) {
+    const optId = TIER_OPTION_IDS[input.tier];
+    if (!optId) throw new Error(`Unknown tier "${input.tier}". Expected T1-T7.`);
+    customFields.push({ id: TIER_FIELD_ID, value: optId });
+  }
+  const weekNames = (input.weekNames && input.weekNames.length ? input.weekNames : DEFAULT_WEEK_NAMES);
+  const weekCount = weekNames.length;
 
   // 1. Parent task — description includes Training Manual + Onboarding Instructions
   //    doc links so OMs and trainees can find every SOP, quiz, and walk-through
   //    from a single starting point.
-  const TRAINING_MANUAL_URL = "https://app.clickup.com/9014079163/docs/8cmfvnv-47334";
+  const TRAINING_MANUAL_URL = input.manualUrl || DEFAULT_MANUAL_URL;
   const ONBOARDING_INSTRUCTIONS_URL = "https://app.clickup.com/9014079163/docs/8cmfvnv-47374";
   const parentDesc = [
     `**📚 Training Manual:** ${TRAINING_MANUAL_URL}`,
@@ -156,32 +186,29 @@ async function createParent(env: Env, input: OnboardInput): Promise<any> {
     `**Start Date:** ${input.start}`,
     ``,
     `---`,
-    `This folder contains the full 4-week Patient Coordinator onboarding program.`,
-    `Each week's tasks are nested as subtasks. Open the Training Manual above for`,
-    `SOP links, quiz questions, and high-conversion verbiage scripts.`,
+    input.tier ? `**Starting Tier:** ${input.tier}${input.track ? ` (track ${input.track})` : ""}` : ``,
+    `This task contains the full ${weekCount}-phase ${input.role} onboarding program.`,
+    `Each phase's tasks are nested as subtasks. Open the Training Manual above for`,
+    `SOP links, quiz questions, and scripts.`,
   ].join("\n");
 
   const parent = await cu(env, "POST", `/list/${LIST_ID_ACTIVE}/task`, {
     name: `${input.name} - ${input.office} - ${input.role} - ${input.start}`,
     description: parentDesc,
     start_date: startMs,
-    custom_fields: homeOfficeCustom,
+    custom_fields: customFields.length ? customFields : undefined,
   });
 
-  // 2. Four week subtasks (5 subrequests total, well under cap)
-  const weekLabels = {
-    w1: "Week 1 — Foundation & Front Desk Basics",
-    w2: "Week 2 — Reinforcement & Supervised Practice",
-    w3: "Week 3 — Treatment Planning & Checkout",
-    w4: "Week 4 — Applied Practice & Go-Live",
-  };
+  // 2. Phase subtasks, one per weekNames entry (keys w1..wN). Max 10 keeps us
+  //    well under the 50-subrequest cap.
+  if (weekCount > 10) throw new Error(`Too many phases: ${weekCount}. Max 10.`);
   const weeks: Record<string, string> = {};
-  for (const key of Object.keys(weekLabels) as (keyof typeof weekLabels)[]) {
+  for (let i = 0; i < weekCount; i++) {
     const wk = await cu(env, "POST", `/list/${LIST_ID_ACTIVE}/task`, {
-      name: weekLabels[key],
+      name: weekNames[i],
       parent: parent.id,
     });
-    weeks[key] = wk.id;
+    weeks[`w${i + 1}`] = wk.id;
   }
 
   return {
